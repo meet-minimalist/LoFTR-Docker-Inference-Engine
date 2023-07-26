@@ -1,4 +1,5 @@
 Flask==2.3.2
+kornia==0.6.12
 kornia_rs==0.0.8
 kornia_moons==0.2.6
 numpy==1.24.4

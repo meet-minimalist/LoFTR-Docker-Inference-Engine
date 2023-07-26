@@ -13,9 +13,15 @@ WORKDIR /data
 
 COPY . /data
 
-EXPOSE 5000
+RUN pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 
-RUN "/data/setup.sh"
+RUN pip --no-cache-dir install -r requirements.txt
+
+RUN pip uninstall opencv-python -y
+
+RUN pip install opencv_python_headless==4.8.0.74
+
+EXPOSE 5000
 
 ENTRYPOINT [ "python" ]
 
