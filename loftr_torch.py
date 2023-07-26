@@ -20,9 +20,9 @@ from misc import load_img, preprocess
 class InferenceEngine:
     """Wrapper class for LoFTR inference."""
 
-    def __init__(self, model_path):
+    def __init__(self):
         """Initializer class to initiate the model."""
-        self.sess = ort.InferenceSession(model_path)
+        self.matcher = KF.LoFTR(pretrained="outdoor")
 
     def __call__(
         self, img_path_1: str, img_path_2: str, op_dir: str
@@ -44,43 +44,42 @@ class InferenceEngine:
         img_1_resized, img_1_gray = preprocess(img_1, (600, 375))
         img_2_resized, img_2_gray = preprocess(img_2, (600, 375))
 
-        data = {"image_1": img_1_gray.numpy(), "image_2": img_2_gray.numpy()}
-        result = self.sess.run(None, data)
+        data = {"image0": img_1_gray, "image1": img_2_gray}
+        
+        with torch.inference_mode():
+            correspondences = self.matcher(data)
         # keypoints0 : [N, 2]
         # keypoints1 : [N, 2]
         # confidence : [N]
         # batch_indexes: [N]
 
-        mkpts0 = result[0]
-        mkpts1 = result[1]
-
-        Fm, inliers = cv2.findFundamentalMat(
-            mkpts0, mkpts1, cv2.USAC_MAGSAC, 0.5, 0.999, 100000
-        )
+        mkpts0 = correspondences["keypoints0"].cpu().numpy()
+        mkpts1 = correspondences["keypoints1"].cpu().numpy()
+        Fm, inliers = cv2.findFundamentalMat(mkpts0, mkpts1, cv2.USAC_MAGSAC, 0.5, 0.999, 100000)
         inliers = inliers > 0
-
+        
         fig, ax = draw_LAF_matches(
             KF.laf_from_center_scale_ori(
-                torch.Tensor(mkpts0).view(1, -1, 2),
+                torch.from_numpy(mkpts0).view(1, -1, 2),
                 torch.ones(mkpts0.shape[0]).view(1, -1, 1, 1),
                 torch.ones(mkpts0.shape[0]).view(1, -1, 1),
             ),
             KF.laf_from_center_scale_ori(
-                torch.Tensor(mkpts1).view(1, -1, 2),
+                torch.from_numpy(mkpts1).view(1, -1, 2),
                 torch.ones(mkpts1.shape[0]).view(1, -1, 1, 1),
                 torch.ones(mkpts1.shape[0]).view(1, -1, 1),
             ),
             torch.arange(mkpts0.shape[0]).view(-1, 1).repeat(1, 2),
-            K.utils.tensor_to_image(img_1_resized),
-            K.utils.tensor_to_image(img_2_resized),
+            K.tensor_to_image(img_1_resized),
+            K.tensor_to_image(img_2_resized),
             inliers,
             draw_dict={
-                "inlier_color": (0.2, 1, 0.2),
-                "tentative_color": None,
-                "feature_color": (0.2, 0.5, 1),
-                "vertical": False,
+                "inlier_color": (0.2, 1, 0.2), 
+                "tentative_color": None, 
+                "feature_color": (0.2, 0.5, 1), 
+                "vertical": False
             },
-            return_fig_ax=True,
+            return_fig_ax=True
         )
 
         plt.axis("off")
@@ -92,4 +91,4 @@ class InferenceEngine:
         processed_img_path = os.path.join(op_dir, processed_img_name)
         fig.savefig(processed_img_path, bbox_inches="tight", pad_inches=0)
 
-        return result, processed_img_path
+        return correspondences, processed_img_path

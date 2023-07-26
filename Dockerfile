@@ -9,10 +9,6 @@ FROM python:3.8.10-slim-buster
 
 LABEL Meet Patel 
 
-RUN apt-get update && \
-    apt-get upgrade -y && \
-    apt-get install -y git wget
-
 WORKDIR /data
 
 COPY . /data

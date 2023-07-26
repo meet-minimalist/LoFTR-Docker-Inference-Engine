@@ -9,24 +9,18 @@ from flask import Flask, render_template, request, send_from_directory
 import os
 import traceback
 import time
-from loftr import InferenceEngine
+from loftr_torch import InferenceEngine
 
 app = Flask(__name__)
 
 UPLOAD_FOLDER = "uploads"
 PROCESSED_FOLDER = "processed"
-model_path = "./model/loftr_opt.onnx"
-
-if not os.path.isfile(model_path):
-    print("Model not found. Exiting...")
-    exit()
 
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 app.config["PROCESSED_FOLDER"] = PROCESSED_FOLDER
 
-infer_engine = InferenceEngine(model_path)
+infer_engine = InferenceEngine()
 
-infer_engine("./temp/kn_church-2.jpg", "./temp/kn_church-8.jpg", "./temp/")
 
 @app.route("/")
 def index() -> str:
