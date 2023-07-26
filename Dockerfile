@@ -9,19 +9,18 @@ FROM python:3.8.10-slim-buster
 
 LABEL Meet Patel 
 
+RUN apt-get update && \
+    apt-get upgrade -y && \
+    apt-get install -y git wget
+
 WORKDIR /data
 
 COPY . /data
 
-RUN pip --no-cache-dir install -r requirements.txt
-
-RUN pip uninstall opencv-python
-
-RUN pip install opencv_python_headless==4.8.0.74
-
 EXPOSE 5000
+
+RUN "/data/setup.sh"
 
 ENTRYPOINT [ "python" ]
 
-CMD ["app_actual.py"]
-
+CMD [ "app.py" ]

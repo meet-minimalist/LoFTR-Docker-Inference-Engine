@@ -8,18 +8,25 @@
 from flask import Flask, render_template, request, send_from_directory
 import os
 import traceback
+import time
 from loftr import InferenceEngine
 
 app = Flask(__name__)
 
 UPLOAD_FOLDER = "uploads"
 PROCESSED_FOLDER = "processed"
+model_path = "./model/loftr_opt.onnx"
+
+if not os.path.isfile(model_path):
+    print("Model not found. Exiting...")
+    exit()
 
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 app.config["PROCESSED_FOLDER"] = PROCESSED_FOLDER
 
-infer_engine = InferenceEngine()
+infer_engine = InferenceEngine(model_path)
 
+infer_engine("./temp/kn_church-2.jpg", "./temp/kn_church-8.jpg", "./temp/")
 
 @app.route("/")
 def index() -> str:
@@ -56,11 +63,15 @@ def upload() -> str:
         image1.save(upload_path_1)
         image2.save(upload_path_2)
 
+        start = time.time()
         model_outputs, processed_path = infer_engine(
             upload_path_1, upload_path_2, app.config["PROCESSED_FOLDER"]
         )
+        delta = time.time() - start
+        
         download_url = f"/download/{os.path.basename(processed_path)}"
-        return f"Images uploaded and processed successfully! Download link: <a href='{download_url}'>{download_url}</a>"
+        return "Images uploaded and processed successfully! Model inference " \
+            f"time: {delta:.2f} sec. Download link: <a href='{download_url}'>{download_url}</a>"
 
     except Exception as e:
         traceback.print_exc()
@@ -83,4 +94,4 @@ if __name__ == "__main__":
     if not os.path.exists(PROCESSED_FOLDER):
         os.makedirs(PROCESSED_FOLDER)
     port = 5000
-    app.run(debug=True, host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port)

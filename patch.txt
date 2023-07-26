@@ -1,0 +1,509 @@
+diff --git a/kornia/feature/loftr/loftr.py b/kornia/feature/loftr/loftr.py
+index 5dc19ddd..ecbfc9c6 100644
+--- a/kornia/feature/loftr/loftr.py
++++ b/kornia/feature/loftr/loftr.py
+@@ -1,6 +1,6 @@
+ from __future__ import annotations
+ 
+-from typing import Any
++from typing import Any, Tuple
+ 
+ import torch
+ 
+@@ -101,7 +101,7 @@ class LoFTR(Module):
+             self.load_state_dict(pretrained_dict['state_dict'])
+         self.eval()
+ 
+-    def forward(self, data: dict[str, Tensor]) -> dict[str, Tensor]:
++    def forward(self, image0: Tensor, image1: Tensor) -> Tuple[Tensor]:
+         """
+         Args:
+             data: dictionary containing the input data in the following format:
+@@ -119,26 +119,35 @@ class LoFTR(Module):
+             - ``batch_indexes``, batch indexes for the keypoints and lafs :math:`(NC)`.
+         """
+         # 1. Local Feature CNN
+-        _data: dict[str, Tensor | int | torch.Size] = {
+-            'bs': data['image0'].size(0),
+-            'hw0_i': data['image0'].shape[2:],
+-            'hw1_i': data['image1'].shape[2:],
+-        }
+-
+-        if _data['hw0_i'] == _data['hw1_i']:  # faster & better BN convergence
+-            feats_c, feats_f = self.backbone(torch.cat([data['image0'], data['image1']], dim=0))
+-            (feat_c0, feat_c1), (feat_f0, feat_f1) = feats_c.split(_data['bs']), feats_f.split(_data['bs'])
++        # _data: dict[str, Tensor | int | torch.Size] = {
++        #     'bs': image0.size(0),
++        #     'hw0_i': image0.shape[2:],
++        #     'hw1_i': image1.shape[2:],
++        # }
++
++        _data_bs = image0.size(0)
++        _data_hw0_i = image0.shape[2:]
++        _data_hw1_i = image1.shape[2:]
++
++        if _data_hw0_i == _data_hw1_i:  # faster & better BN convergence
++            feats_c, feats_f = self.backbone(torch.cat([image0, image1], dim=0))
++            (feat_c0, feat_c1), (feat_f0, feat_f1) = feats_c.split(_data_bs), feats_f.split(_data_bs)
+         else:  # handle different input shapes
+-            (feat_c0, feat_f0), (feat_c1, feat_f1) = self.backbone(data['image0']), self.backbone(data['image1'])
+-
+-        _data.update(
+-            {
+-                'hw0_c': feat_c0.shape[2:],
+-                'hw1_c': feat_c1.shape[2:],
+-                'hw0_f': feat_f0.shape[2:],
+-                'hw1_f': feat_f1.shape[2:],
+-            }
+-        )
++            (feat_c0, feat_f0), (feat_c1, feat_f1) = self.backbone(image0), self.backbone(image1)
++
++        # _data.update(
++        #     {
++        #         'hw0_c': feat_c0.shape[2:],
++        #         'hw1_c': feat_c1.shape[2:],
++        #         'hw0_f': feat_f0.shape[2:],
++        #         'hw1_f': feat_f1.shape[2:],
++        #     }
++        # )
++
++        _data_hw0_c = feat_c0.shape[2:]
++        _data_hw1_c = feat_c1.shape[2:]
++        _data_hw0_f = feat_f0.shape[2:]
++        _data_hw1_f = feat_f1.shape[2:]
+ 
+         # 2. coarse-level loftr module
+         # add featmap with positional encoding, then flatten it to sequence [N, HW, C]
+@@ -154,37 +163,42 @@ class LoFTR(Module):
+         feat_c1 = feat_c1.reshape(n1, -1, c1)
+ 
+         mask_c0 = mask_c1 = None  # mask is useful in training
+-        if 'mask0' in _data:
+-            mask_c0 = resize(data['mask0'], _data['hw0_c'], interpolation='nearest').flatten(-2)
+-        if 'mask1' in _data:
+-            mask_c1 = resize(data['mask1'], _data['hw1_c'], interpolation='nearest').flatten(-2)
++        # if 'mask0' in _data:
++        #     mask_c0 = resize(data['mask0'], _data['hw0_c'], interpolation='nearest').flatten(-2)
++        # if 'mask1' in _data:
++        #     mask_c1 = resize(data['mask1'], _data['hw1_c'], interpolation='nearest').flatten(-2)
+         feat_c0, feat_c1 = self.loftr_coarse(feat_c0, feat_c1, mask_c0, mask_c1)
+ 
++
++        _data_scale0 = None
++        _data_scale1 = None
++        
+         # 3. match coarse-level
+-        self.coarse_matching(feat_c0, feat_c1, _data, mask_c0=mask_c0, mask_c1=mask_c1)
++        _data_conf_matrix_with_bin, _data_conf_matrix, _data_b_ids, _data_i_ids, _data_j_ids, _data_gt_mask, _data_m_bids, _data_mkpts0_c, _data_mkpts1_c, _data_mconf = self.coarse_matching(feat_c0, feat_c1, _data_hw0_c, _data_hw1_c, _data_hw0_i, _data_scale0, _data_scale1, mask_c0=mask_c0, mask_c1=mask_c1)
+ 
+         # 4. fine-level refinement
+-        feat_f0_unfold, feat_f1_unfold = self.fine_preprocess(feat_f0, feat_f1, feat_c0, feat_c1, _data)
++        feat_f0_unfold, feat_f1_unfold = self.fine_preprocess(feat_f0, feat_f1, feat_c0, feat_c1, _data_hw0_f, _data_hw0_c, _data_b_ids, _data_i_ids, _data_j_ids)
+         if feat_f0_unfold.size(0) != 0:  # at least one coarse level predicted
+             feat_f0_unfold, feat_f1_unfold = self.loftr_fine(feat_f0_unfold, feat_f1_unfold)
+ 
+         # 5. match fine-level
+-        self.fine_matching(feat_f0_unfold, feat_f1_unfold, _data)
+-
+-        rename_keys: dict[str, str] = {
+-            "mkpts0_f": 'keypoints0',
+-            "mkpts1_f": 'keypoints1',
+-            "mconf": 'confidence',
+-            "b_ids": 'batch_indexes',
+-        }
+-        out: dict[str, Tensor] = {}
+-        for k, v in rename_keys.items():
+-            _d = _data[k]
+-            if isinstance(_d, Tensor):
+-                out[v] = _d
+-            else:
+-                raise TypeError(f'Expected Tensor for item `{k}`. Gotcha {type(_d)}')
+-        return out
++        _data_mkpts0_f, _data_mkpts1_f = self.fine_matching(feat_f0_unfold, feat_f1_unfold, _data_hw0_i, _data_hw0_f, _data_mkpts0_c, _data_mkpts1_c, _data_scale0, _data_scale1, _data_b_ids, _data_mconf)
++
++        # rename_keys: dict[str, str] = {
++        #     "mkpts0_f": 'keypoints0',
++        #     "mkpts1_f": 'keypoints1',
++        #     "mconf": 'confidence',
++        #     "b_ids": 'batch_indexes',
++        # }
++        # out: dict[str, Tensor] = {}
++        # for k, v in rename_keys.items():
++        #     _d = _data[k]
++        #     if isinstance(_d, Tensor):
++        #         out[v] = _d
++        #     else:
++        #         raise TypeError(f'Expected Tensor for item `{k}`. Gotcha {type(_d)}')
++        # return out
++        return _data_mkpts0_f, _data_mkpts1_f, _data_mconf, _data_b_ids
+ 
+     def load_state_dict(self, state_dict: dict[str, Any], *args: Any, **kwargs: Any) -> Any:  # type: ignore[override]
+         for k in list(state_dict.keys()):
+diff --git a/kornia/feature/loftr/loftr_module/fine_preprocess.py b/kornia/feature/loftr/loftr_module/fine_preprocess.py
+index e0ab0670..2df4e679 100644
+--- a/kornia/feature/loftr/loftr_module/fine_preprocess.py
++++ b/kornia/feature/loftr/loftr_module/fine_preprocess.py
+@@ -30,17 +30,21 @@ class FinePreprocess(Module):
+                 nn.init.kaiming_normal_(p, mode="fan_out", nonlinearity="relu")
+ 
+     def forward(
+-        self, feat_f0: Tensor, feat_f1: Tensor, feat_c0: Tensor, feat_c1: Tensor, data: Dict[str, Any]
++        self, feat_f0: Tensor, feat_f1: Tensor, feat_c0: Tensor, feat_c1: Tensor, data_hw0_f: Tensor, data_hw0_c: Tensor, data_b_ids: Tensor, data_i_ids: Tensor, data_j_ids: Tensor,
+     ) -> Tuple[Tensor, Tensor]:
+         W = self.W
+-        stride = data['hw0_f'][0] // data['hw0_c'][0]
++        
++        stride = data_hw0_f[0] // data_hw0_c[0]
+ 
+-        data.update({'W': W})
+-        if data['b_ids'].shape[0] == 0:
++        # data.update({'W': W})
++        if data_b_ids.shape[0] == 0:
+             feat0 = torch.empty(0, self.W**2, self.d_model_f, device=feat_f0.device)
+             feat1 = torch.empty(0, self.W**2, self.d_model_f, device=feat_f0.device)
+             return feat0, feat1
+ 
++
++        if isinstance(stride, Tensor):
++            stride = stride.item()
+         # 1. unfold(crop) all local windows
+         feat_f0_unfold = F.unfold(feat_f0, kernel_size=(W, W), stride=stride, padding=W // 2)
+ 
+@@ -56,13 +60,13 @@ class FinePreprocess(Module):
+         feat_f1_unfold = feat_f1_unfold.reshape(n1, c1, -1, l1).permute(0, 3, 2, 1)
+ 
+         # 2. select only the predicted matches
+-        feat_f0_unfold = feat_f0_unfold[data['b_ids'], data['i_ids']]  # [n, ww, cf]
+-        feat_f1_unfold = feat_f1_unfold[data['b_ids'], data['j_ids']]
++        feat_f0_unfold = feat_f0_unfold[data_b_ids, data_i_ids]  # [n, ww, cf]
++        feat_f1_unfold = feat_f1_unfold[data_b_ids, data_j_ids]
+ 
+         # option: use coarse-level loftr feature as context: concat and linear
+         if self.cat_c_feat:
+             feat_c_win = self.down_proj(
+-                torch.cat([feat_c0[data['b_ids'], data['i_ids']], feat_c1[data['b_ids'], data['j_ids']]], 0)
++                torch.cat([feat_c0[data_b_ids, data_i_ids], feat_c1[data_b_ids, data_j_ids]], 0)
+             )  # [2n, c]
+             feat_cf_win = self.merge_feat(
+                 torch.cat(
+diff --git a/kornia/feature/loftr/utils/coarse_matching.py b/kornia/feature/loftr/utils/coarse_matching.py
+index a1ef3b01..791d873d 100644
+--- a/kornia/feature/loftr/utils/coarse_matching.py
++++ b/kornia/feature/loftr/utils/coarse_matching.py
+@@ -1,4 +1,4 @@
+-from typing import Any, Dict, Optional, Union
++from typing import Any, Dict, Optional, Union, List
+ 
+ import torch
+ import torch.nn.functional as F
+@@ -9,7 +9,7 @@ from kornia.core import Module, Tensor
+ INF = 1e9
+ 
+ 
+-def mask_border(m: Tensor, b: int, v: Union[Tensor, float, int, bool]) -> None:
++def mask_border(m: Tensor, b: int, v: Union[Tensor, float, int, bool]) -> Tensor:
+     """Mask borders with value
+     Args:
+         m (torch.Tensor): [N, H0, W0, H1, W1]
+@@ -27,11 +27,12 @@ def mask_border(m: Tensor, b: int, v: Union[Tensor, float, int, bool]) -> None:
+     m[:, :, -b:] = v
+     m[:, :, :, -b:] = v
+     m[:, :, :, :, -b:] = v
++    return m
+ 
+ 
+ def mask_border_with_padding(
+     m: Tensor, bd: int, v: Union[Tensor, float, int, bool], p_m0: Tensor, p_m1: Tensor
+-) -> None:
++) -> Tensor:
+     if bd <= 0:
+         return
+ 
+@@ -47,6 +48,7 @@ def mask_border_with_padding(
+         m[b_idx, :, w0 - bd :] = v
+         m[b_idx, :, :, h1 - bd :] = v
+         m[b_idx, :, :, :, w1 - bd :] = v
++    return m
+ 
+ 
+ def compute_max_candidates(p_m0: Tensor, p_m1: Tensor) -> Tensor:
+@@ -92,7 +94,12 @@ class CoarseMatching(Module):
+         self,
+         feat_c0: Tensor,
+         feat_c1: Tensor,
+-        data: Dict[str, Tensor],
++        # data: Dict[str, Tensor],
++        _data_hw0_c: Tensor, 
++        _data_hw1_c: Tensor, 
++        _data_hw0_i: Tensor, 
++        _data_scale0: Tensor,
++        _data_scale1: Tensor, 
+         mask_c0: Optional[Tensor] = None,
+         mask_c1: Optional[Tensor] = None,
+     ) -> None:
+@@ -119,6 +126,7 @@ class CoarseMatching(Module):
+         # normalize
+         feat_c0, feat_c1 = (feat / feat.shape[-1] ** 0.5 for feat in [feat_c0, feat_c1])
+ 
++        _data_conf_matrix_with_bin = None
+         if self.match_type == 'dual_softmax':
+             sim_matrix = torch.einsum("nlc,nsc->nls", feat_c0, feat_c1) / self.temperature
+             if mask_c0 is not None and mask_c1 is not None:
+@@ -144,15 +152,17 @@ class CoarseMatching(Module):
+                 conf_matrix[filter1[:, None].repeat(1, L, 1)] = 0
+ 
+             if self.config['sparse_spvs']:
+-                data.update({'conf_matrix_with_bin': assign_matrix.clone()})
++                _data_conf_matrix_with_bin = assign_matrix.clone()
+ 
+-        data.update({'conf_matrix': conf_matrix})
++        _data_conf_matrix = conf_matrix
+ 
+         # predict coarse matches from conf_matrix
+-        data.update(**self.get_coarse_match(conf_matrix, data))
++        _cm_b_ids, _cm_i_ids, _cm_j_ids, _cm_gt_mask, _cm_m_bids, _cm_mkpts0_c, _cm_mkpts1_c, _cm_mconf = self.get_coarse_match(conf_matrix, _data_hw0_c, _data_hw1_c, _data_hw0_i, _data_scale0, _data_scale1, mask_c0, mask_c1)
++        
++        return _data_conf_matrix_with_bin, _data_conf_matrix, _cm_b_ids, _cm_i_ids, _cm_j_ids, _cm_gt_mask, _cm_m_bids, _cm_mkpts0_c, _cm_mkpts1_c, _cm_mconf
+ 
+     @torch.no_grad()
+-    def get_coarse_match(self, conf_matrix: Tensor, data: Dict[str, Tensor]) -> Dict[str, Tensor]:
++    def get_coarse_match(self, conf_matrix: Tensor, _data_hw0_c: Tensor, _data_hw1_c: Tensor, _data_hw0_i: Tensor, _data_scale0: Tensor, _data_scale1: Tensor, _mask0: Tensor, _mask1: Tensor) -> List[Tensor]:
+         """
+         Args:
+             conf_matrix (torch.Tensor): [N, L, S]
+@@ -168,32 +178,38 @@ class CoarseMatching(Module):
+                 'mkpts1_c' (torch.Tensor): [M, 2],
+                 'mconf' (torch.Tensor): [M]}
+         """
+-        axes_lengths = {
+-            'h0c': data['hw0_c'][0],
+-            'w0c': data['hw0_c'][1],
+-            'h1c': data['hw1_c'][0],
+-            'w1c': data['hw1_c'][1],
+-        }
++        # axes_lengths = {
++        #     'h0c': data['hw0_c'][0],
++        #     'w0c': data['hw0_c'][1],
++        #     'h1c': data['hw1_c'][0],
++        #     'w1c': data['hw1_c'][1],
++        # }
++        _h0c = _data_hw0_c[0]
++        _w0c = _data_hw0_c[1]
++        _h1c = _data_hw1_c[0]
++        _w1c = _data_hw1_c[1]
+         _device = conf_matrix.device
+         # 1. confidence thresholding
+         mask = conf_matrix > self.thr
+         N = conf_matrix.shape[0]
+-        mask = mask.reshape(N, axes_lengths['h0c'], axes_lengths['w0c'], axes_lengths['h1c'], axes_lengths['w1c'])
++        mask = mask.reshape(N, _h0c, _w0c, _h1c, _w1c)
+         # mask = rearrange(mask, 'b (h0c w0c) (h1c w1c) -> b h0c w0c h1c w1c',
+         #                 **axes_lengths)
+-        if 'mask0' not in data:
+-            mask_border(mask, self.border_rm, False)
++        # _mask0 = None
++        # _mask1 = None
++        if _mask0 is None:
++            mask = mask_border(mask, self.border_rm, False)
+         else:
+-            mask_border_with_padding(mask, self.border_rm, False, data['mask0'], data['mask1'])
+-        mask = mask.reshape(N, axes_lengths['h0c'] * axes_lengths['w0c'], axes_lengths['h1c'] * axes_lengths['w1c'])
++            mask = mask_border_with_padding(mask, self.border_rm, False, _mask0, _mask1)
++        mask = mask.reshape(N, _h0c * _w0c, _h1c * _w1c)
+         # rearrange(mask, 'b h0c w0c h1c w1c -> b (h0c w0c) (h1c w1c)',
+         #                 **axes_lengths)
+ 
+         # 2. mutual nearest
+         mask = (
+             mask
+-            * (conf_matrix == conf_matrix.max(dim=2, keepdim=True)[0])
+-            * (conf_matrix == conf_matrix.max(dim=1, keepdim=True)[0])
++            * (conf_matrix == conf_matrix.max(dim=2, keepdim=True)[0]).to(torch.float32)
++            * (conf_matrix == conf_matrix.max(dim=1, keepdim=True)[0]).to(torch.float32)
+         )
+ 
+         # 3. find all valid coarse matches
+@@ -209,10 +225,11 @@ class CoarseMatching(Module):
+             # NOTE:
+             # The sampling is performed across all pairs in a batch without manually balancing
+             # #samples for fine-level increases w.r.t. batch_size
+-            if 'mask0' not in data:
++            if _mask0 is None:
++            # if 'mask0' not in data:
+                 num_candidates_max = mask.size(0) * max(mask.size(1), mask.size(2))
+             else:
+-                num_candidates_max = compute_max_candidates(data['mask0'], data['mask1'])
++                num_candidates_max = compute_max_candidates(_mask0, _mask1)
+             num_matches_train = num_candidates_max * self.train_coarse_percent
+             num_matches_train = int(num_matches_train)
+             num_matches_pred = len(b_ids)
+@@ -228,43 +245,55 @@ class CoarseMatching(Module):
+                     num_matches_pred, (num_matches_train - self.train_pad_num_gt_min,), device=_device
+                 )
+ 
++            _data_spv_b_ids = None  # doesnt matter in training
++            _data_spv_i_ids = None
++            _data_spv_j_ids = None
++            
+             # gt_pad_indices is to select from gt padding. e.g. max(3787-4800, 200)
+             gt_pad_indices = torch.randint(
+-                len(data['spv_b_ids']),
++                len(_data_spv_b_ids),
+                 (max(num_matches_train - num_matches_pred, self.train_pad_num_gt_min),),
+                 device=_device,
+             )
+-            mconf_gt = torch.zeros(len(data['spv_b_ids']), device=_device)  # set conf of gt paddings to all zero
++            mconf_gt = torch.zeros(len(_data_spv_b_ids), device=_device)  # set conf of gt paddings to all zero
+ 
+             b_ids, i_ids, j_ids, mconf = (  # type: ignore
+                 torch.cat([x[pred_indices], y[gt_pad_indices]], dim=0)  # type: ignore[has-type]
+                 for x, y in zip(
+-                    [b_ids, data['spv_b_ids']],
+-                    [i_ids, data['spv_i_ids']],
+-                    [j_ids, data['spv_j_ids']],
++                    [b_ids, _data_spv_b_ids],
++                    [i_ids, _data_spv_i_ids],
++                    [j_ids, _data_spv_j_ids],
+                     [mconf, mconf_gt],
+                 )
+             )
+ 
+         # These matches select patches that feed into fine-level network
+-        coarse_matches = {'b_ids': b_ids, 'i_ids': i_ids, 'j_ids': j_ids}
++        # coarse_matches = {'b_ids': b_ids, 'i_ids': i_ids, 'j_ids': j_ids}
++        _cm_b_ids = b_ids
++        _cm_i_ids = i_ids
++        _cm_j_ids = j_ids
+ 
+         # 4. Update with matches in original image resolution
+-        scale = data['hw0_i'][0] / data['hw0_c'][0]
+-        scale0 = scale * data['scale0'][b_ids] if 'scale0' in data else scale
+-        scale1 = scale * data['scale1'][b_ids] if 'scale1' in data else scale
+-        mkpts0_c = torch.stack([i_ids % data['hw0_c'][1], i_ids // data['hw0_c'][1]], dim=1) * scale0
+-        mkpts1_c = torch.stack([j_ids % data['hw1_c'][1], j_ids // data['hw1_c'][1]], dim=1) * scale1
++        scale = _data_hw0_i[0] / _data_hw0_c[0]
++        scale0 = scale * _data_scale0[b_ids] if _data_scale0 is not None else scale
++        scale1 = scale * _data_scale1[b_ids] if _data_scale1 is not None else scale
++        mkpts0_c = torch.stack([i_ids % _data_hw0_c[1], i_ids // _data_hw0_c[1]], dim=1) * scale0
++        mkpts1_c = torch.stack([j_ids % _data_hw1_c[1], j_ids // _data_hw1_c[1]], dim=1) * scale1
+ 
+         # These matches is the current prediction (for visualization)
+-        coarse_matches.update(
+-            {
+-                'gt_mask': mconf == 0,
+-                'm_bids': b_ids[mconf != 0],  # mconf == 0 => gt matches
+-                'mkpts0_c': mkpts0_c[mconf != 0].to(dtype=conf_matrix.dtype),
+-                'mkpts1_c': mkpts1_c[mconf != 0].to(dtype=conf_matrix.dtype),
+-                'mconf': mconf[mconf != 0],
+-            }
+-        )
+-
+-        return coarse_matches
++        # coarse_matches.update(
++        #     {
++        #         'gt_mask': mconf == 0,
++        #         'm_bids': b_ids[mconf != 0],  # mconf == 0 => gt matches
++        #         'mkpts0_c': mkpts0_c[mconf != 0].to(dtype=conf_matrix.dtype),
++        #         'mkpts1_c': mkpts1_c[mconf != 0].to(dtype=conf_matrix.dtype),
++        #         'mconf': mconf[mconf != 0],
++        #     }
++        # )
++        _cm_gt_mask = mconf == 0
++        _cm_m_bids = b_ids[mconf != 0]  # mconf == 0 => gt matches
++        _cm_mkpts0_c = mkpts0_c[mconf != 0].to(dtype=conf_matrix.dtype)
++        _cm_mkpts1_c = mkpts1_c[mconf != 0].to(dtype=conf_matrix.dtype)
++        _cm_mconf = mconf[mconf != 0]
++
++        return _cm_b_ids, _cm_i_ids, _cm_j_ids, _cm_gt_mask, _cm_m_bids, _cm_mkpts0_c, _cm_mkpts1_c, _cm_mconf
+diff --git a/kornia/feature/loftr/utils/fine_matching.py b/kornia/feature/loftr/utils/fine_matching.py
+index 70c849c2..d84a84c5 100644
+--- a/kornia/feature/loftr/utils/fine_matching.py
++++ b/kornia/feature/loftr/utils/fine_matching.py
+@@ -1,7 +1,7 @@
+ from __future__ import annotations
+ 
+ import math
+-from typing import Any
++from typing import Any, Tuple
+ 
+ import torch
+ 
+@@ -16,7 +16,7 @@ class FineMatching(Module):
+     def __init__(self) -> None:
+         super().__init__()
+ 
+-    def forward(self, feat_f0: Tensor, feat_f1: Tensor, data: dict[str, Any]) -> None:
++    def forward(self, feat_f0: Tensor, feat_f1: Tensor, _data_hw0_i: Tensor, _data_hw0_f: Tensor, _data_mkpts0_c: Tensor, _data_mkpts1_c: Tensor, _data_scale0: Tensor, _data_scale1: Tensor, _data_b_ids: Tensor, _data_mconf: Tensor) -> None:
+         """
+         Args:
+             feat0 (torch.Tensor): [M, WW, C]
+@@ -30,7 +30,7 @@ class FineMatching(Module):
+         """
+         M, WW, C = feat_f0.shape
+         W = int(math.sqrt(WW))
+-        scale = data['hw0_i'][0] / data['hw0_f'][0]
++        scale = _data_hw0_i[0] / _data_hw0_f[0]
+         self.M, self.W, self.WW, self.C, self.scale = M, W, WW, C, scale
+ 
+         # corner case: if no coarse matches found
+@@ -38,14 +38,18 @@ class FineMatching(Module):
+             if self.training:
+                 raise ValueError("M >0, when training, see coarse_matching.py")
+             # logger.warning('No matches found in coarse-level.')
+-            data.update(
+-                {
+-                    'expec_f': torch.empty(0, 3, device=feat_f0.device, dtype=feat_f0.dtype),
+-                    'mkpts0_f': data['mkpts0_c'],
+-                    'mkpts1_f': data['mkpts1_c'],
+-                }
+-            )
+-            return
++            # data.update(
++            #     {
++            #         'expec_f': torch.empty(0, 3, device=feat_f0.device, dtype=feat_f0.dtype),
++            #         'mkpts0_f': data['mkpts0_c'],
++            #         'mkpts1_f': data['mkpts1_c'],
++            #     }
++            # )
++            _data_expec_f = torch.empty(0, 3, device=feat_f0.device, dtype=feat_f0.dtype)
++            _data_mkpts0_f = _data_mkpts0_c
++            _data_mkpts1_f = _data_mkpts1_c
++
++            return _data_mkpts0_f, _data_mkpts1_f
+ 
+         feat_f0_picked = feat_f0_picked = feat_f0[:, WW // 2, :]
+         sim_matrix = torch.einsum('mc,mrc->mr', feat_f0_picked, feat_f1)
+@@ -65,18 +69,25 @@ class FineMatching(Module):
+         std = torch.sum(torch.sqrt(torch.clamp(var, min=1e-10)), -1)  # [M]  clamp needed for numerical stability
+ 
+         # for fine-level supervision
+-        data.update({'expec_f': torch.cat([coords_normalized, std.unsqueeze(1)], -1)})
++        # data.update({'expec_f': torch.cat([coords_normalized, std.unsqueeze(1)], -1)})
++        _data_expec_f = torch.cat([coords_normalized, std.unsqueeze(1)], -1)
+ 
+         # compute absolute kpt coords
+-        self.get_fine_match(coords_normalized, data)
++        _data_mkpts0_f, _data_mkpts1_f = self.get_fine_match(coords_normalized, _data_mkpts0_c, _data_mkpts1_c, _data_scale0, _data_scale1, _data_b_ids, _data_mconf)
+ 
++        return _data_mkpts0_f, _data_mkpts1_f
++    
++    
+     @torch.no_grad()
+-    def get_fine_match(self, coords_normed: Tensor, data: dict[str, Any]) -> None:
++    def get_fine_match(self, coords_normed: Tensor, _data_mkpts0_c: Tensor, _data_mkpts1_c: Tensor, _data_scale0: Tensor, _data_scale1: Tensor, _data_b_ids: Tensor, _data_mconf: Tensor) -> Tuple[Tensor]:
+         W, _, _, scale = self.W, self.WW, self.C, self.scale
+ 
+         # mkpts0_f and mkpts1_f
+-        mkpts0_f = data['mkpts0_c']
+-        scale1 = scale * data['scale1'][data['b_ids']] if 'scale0' in data else scale
+-        mkpts1_f = data['mkpts1_c'] + (coords_normed * (W // 2) * scale1)[: len(data['mconf'])]
+-
+-        data.update({"mkpts0_f": mkpts0_f, "mkpts1_f": mkpts1_f})
++        mkpts0_f = _data_mkpts0_c
++        scale1 = scale * _data_scale1[_data_b_ids] if _data_scale0 is not None else scale
++        mkpts1_f = _data_mkpts1_c + (coords_normed * (W // 2) * scale1)[: len(_data_mconf)]
++
++        # data.update({"mkpts0_f": mkpts0_f, "mkpts1_f": mkpts1_f})
++        _data_mkpts0_f = mkpts0_f
++        _data_mkpts1_f = mkpts1_f
++        return _data_mkpts0_f, _data_mkpts1_f

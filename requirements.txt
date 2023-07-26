@@ -1,5 +1,7 @@
 Flask==2.3.2
-kornia==0.6.12
+kornia_rs==0.0.8
 kornia_moons==0.2.6
 numpy==1.24.4
-torch==2.0.1
+onnx==1.14.0
+onnxruntime==1.15.1
+onnxsim==0.4.33

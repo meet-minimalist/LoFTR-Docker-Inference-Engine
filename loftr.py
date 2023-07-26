@@ -6,11 +6,12 @@
 #
 import os
 import cv2
+import torch
 import kornia as K
 import kornia.feature as KF
 import matplotlib.pyplot as plt
-from typing import Dict, Tuple
-import torch
+from typing import List, Tuple
+import onnxruntime as ort
 from kornia_moons.viz import draw_LAF_matches
 
 from misc import load_img, preprocess
@@ -19,13 +20,13 @@ from misc import load_img, preprocess
 class InferenceEngine:
     """Wrapper class for LoFTR inference."""
 
-    def __init__(self):
+    def __init__(self, model_path):
         """Initializer class to initiate the model."""
-        self.matcher = KF.LoFTR(pretrained="outdoor")
+        self.sess = ort.InferenceSession(model_path)
 
     def __call__(
         self, img_path_1: str, img_path_2: str, op_dir: str
-    ) -> Tuple[Dict, str]:
+    ) -> Tuple[List, str]:
         """Function to make inference based on given image paths.
 
         Args:
@@ -34,7 +35,7 @@ class InferenceEngine:
             op_dir (str): Directory where the result will be stored.
 
         Returns:
-            Tuple[Dict, str]: Tuple of model outputs and output path of the
+            Tuple[List, str]: Tuple of model outputs and output path of the
                 result image.
         """
         img_1 = load_img(img_path_1)
@@ -43,21 +44,16 @@ class InferenceEngine:
         img_1_resized, img_1_gray = preprocess(img_1, (600, 375))
         img_2_resized, img_2_gray = preprocess(img_2, (600, 375))
 
-        input_dict = {
-            "image0": img_1_gray,
-            "image1": img_2_gray,
-        }
-
-        with torch.inference_mode():
-            correspondences = self.matcher(input_dict)
-
+        data = {"image_1": img_1_gray.numpy(), "image_2": img_2_gray.numpy()}
+        result = self.sess.run(None, data)
         # keypoints0 : [N, 2]
         # keypoints1 : [N, 2]
         # confidence : [N]
         # batch_indexes: [N]
 
-        mkpts0 = correspondences["keypoints0"].cpu().numpy()
-        mkpts1 = correspondences["keypoints1"].cpu().numpy()
+        mkpts0 = result[0]
+        mkpts1 = result[1]
+
         Fm, inliers = cv2.findFundamentalMat(
             mkpts0, mkpts1, cv2.USAC_MAGSAC, 0.5, 0.999, 100000
         )
@@ -65,18 +61,18 @@ class InferenceEngine:
 
         fig, ax = draw_LAF_matches(
             KF.laf_from_center_scale_ori(
-                torch.from_numpy(mkpts0).view(1, -1, 2),
+                torch.Tensor(mkpts0).view(1, -1, 2),
                 torch.ones(mkpts0.shape[0]).view(1, -1, 1, 1),
                 torch.ones(mkpts0.shape[0]).view(1, -1, 1),
             ),
             KF.laf_from_center_scale_ori(
-                torch.from_numpy(mkpts1).view(1, -1, 2),
+                torch.Tensor(mkpts1).view(1, -1, 2),
                 torch.ones(mkpts1.shape[0]).view(1, -1, 1, 1),
                 torch.ones(mkpts1.shape[0]).view(1, -1, 1),
             ),
             torch.arange(mkpts0.shape[0]).view(-1, 1).repeat(1, 2),
-            K.tensor_to_image(img_1_resized),
-            K.tensor_to_image(img_2_resized),
+            K.utils.tensor_to_image(img_1_resized),
+            K.utils.tensor_to_image(img_2_resized),
             inliers,
             draw_dict={
                 "inlier_color": (0.2, 1, 0.2),
@@ -96,4 +92,4 @@ class InferenceEngine:
         processed_img_path = os.path.join(op_dir, processed_img_name)
         fig.savefig(processed_img_path, bbox_inches="tight", pad_inches=0)
 
-        return correspondences, processed_img_path
+        return result, processed_img_path
