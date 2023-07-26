@@ -13,7 +13,7 @@ WORKDIR /data
 
 COPY . /data
 
-RUN pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 
 RUN pip --no-cache-dir install -r requirements.txt
 
